@@ -5,11 +5,8 @@ use super::{
     primitives as sinsemilla, CommitDomains, HashDomains, SinsemillaInstructions,
 };
 use crate::{
-    ecc::{
-        chip::{DoubleAndAdd, NonIdentityEccPoint},
-        FixedPoints,
-    },
-    utilities::lookup_range_check::LookupRangeCheckConfig,
+    ecc::{chip::NonIdentityEccPoint, FixedPoints},
+    utilities::{double_and_add::DoubleAndAdd, lookup_range_check::LookupRangeCheckConfig},
 };
 use std::marker::PhantomData;
 
@@ -48,7 +45,7 @@ where
     /// Fixed column used to load the y-coordinate of the domain $Q$.
     fixed_y_q: Column<Fixed>,
     /// Logic specific to merged double-and-add.
-    double_and_add: DoubleAndAdd,
+    double_and_add: DoubleAndAdd<pallas::Affine>,
     /// Advice column used to load the message.
     bits: Column<Advice>,
     /// Advice column used to witness message pieces. This may or may not be the same
@@ -160,18 +157,15 @@ where
         for advice in advices.iter() {
             meta.enable_equality(*advice);
         }
+        let double_and_add =
+            DoubleAndAdd::configure(advices[0], advices[1], advices[3], advices[4]);
 
         let config = SinsemillaConfig::<Hash, Commit, F> {
             q_sinsemilla1: meta.complex_selector(),
             q_sinsemilla2: meta.fixed_column(),
             q_sinsemilla4: meta.selector(),
             fixed_y_q,
-            double_and_add: DoubleAndAdd {
-                x_a: advices[0],
-                x_p: advices[1],
-                lambda_1: advices[3],
-                lambda_2: advices[4],
-            },
+            double_and_add,
             bits: advices[2],
             witness_pieces,
             generator_table: GeneratorTableConfig {

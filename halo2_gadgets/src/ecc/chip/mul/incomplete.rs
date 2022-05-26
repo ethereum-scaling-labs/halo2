@@ -1,6 +1,7 @@
 use super::super::NonIdentityEccPoint;
 use super::{X, Y, Z};
 use crate::utilities::bool_check;
+use crate::utilities::double_and_add::DoubleAndAdd;
 use ff::Field;
 use halo2_proofs::{
     circuit::Region,
@@ -11,49 +12,6 @@ use halo2_proofs::{
 };
 
 use pasta_curves::{arithmetic::FieldExt, pallas};
-
-/// A helper struct for implementing single-row double-and-add using incomplete addition.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DoubleAndAdd {
-    // x-coordinate of the accumulator in each double-and-add iteration.
-    pub(crate) x_a: Column<Advice>,
-    // x-coordinate of the point being added in each double-and-add iteration.
-    pub(crate) x_p: Column<Advice>,
-    // lambda1 in each double-and-add iteration.
-    pub(crate) lambda_1: Column<Advice>,
-    // lambda2 in each double-and-add iteration.
-    pub(crate) lambda_2: Column<Advice>,
-}
-
-impl DoubleAndAdd {
-    /// Derives the expression `x_r = lambda_1^2 - x_a - x_p`.
-    pub(crate) fn x_r(
-        &self,
-        meta: &mut VirtualCells<pallas::Base>,
-        rotation: Rotation,
-    ) -> Expression<pallas::Base> {
-        let x_a = meta.query_advice(self.x_a, rotation);
-        let x_p = meta.query_advice(self.x_p, rotation);
-        let lambda_1 = meta.query_advice(self.lambda_1, rotation);
-        lambda_1.square() - x_a - x_p
-    }
-
-    /// Derives the expression `Y_A = (lambda_1 + lambda_2) * (x_a - x_r)`.
-    ///
-    /// Note that this is missing the factor of `1/2`; the Sinsemilla constraints factor
-    /// it out, so we leave it up to the caller to handle it.
-    #[allow(non_snake_case)]
-    pub(crate) fn Y_A(
-        &self,
-        meta: &mut VirtualCells<pallas::Base>,
-        rotation: Rotation,
-    ) -> Expression<pallas::Base> {
-        let x_a = meta.query_advice(self.x_a, rotation);
-        let lambda_1 = meta.query_advice(self.lambda_1, rotation);
-        let lambda_2 = meta.query_advice(self.lambda_2, rotation);
-        (lambda_1 + lambda_2) * (x_a - self.x_r(meta, rotation))
-    }
-}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Config<const NUM_BITS: usize> {
@@ -66,7 +24,7 @@ pub(crate) struct Config<const NUM_BITS: usize> {
     // Cumulative sum used to decompose the scalar.
     pub(super) z: Column<Advice>,
     // Logic specific to merged double-and-add.
-    pub(super) double_and_add: DoubleAndAdd,
+    pub(super) double_and_add: DoubleAndAdd<pallas::Affine>,
     // y-coordinate of the point being added in each double-and-add iteration.
     pub(super) y_p: Column<Advice>,
 }
@@ -84,17 +42,13 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
         meta.enable_equality(z);
         meta.enable_equality(lambda_1);
 
+        let double_and_add = DoubleAndAdd::configure(x_a, x_p, lambda_1, lambda_2);
         let config = Self {
             q_mul_1: meta.selector(),
             q_mul_2: meta.selector(),
             q_mul_3: meta.selector(),
             z,
-            double_and_add: DoubleAndAdd {
-                x_a,
-                x_p,
-                lambda_1,
-                lambda_2,
-            },
+            double_and_add,
             y_p,
         };
 
