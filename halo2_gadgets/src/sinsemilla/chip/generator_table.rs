@@ -4,9 +4,9 @@ use halo2_proofs::{
     poly::Rotation,
 };
 
-use super::{CommitDomains, FixedPoints, HashDomains};
+use super::{q_s3, CommitDomains, FixedPoints, HashDomains};
 use crate::sinsemilla::primitives::{self as sinsemilla, SINSEMILLA_S};
-use pasta_curves::{arithmetic::FieldExt, pallas};
+use pasta_curves::pallas;
 
 /// Table containing independent generators S[0..2^k]
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
@@ -40,7 +40,7 @@ impl GeneratorTableConfig {
         meta.lookup(|meta| {
             let q_s1 = meta.query_selector(config.q_sinsemilla1);
             let q_s2 = meta.query_fixed(config.q_sinsemilla2, Rotation::cur());
-            let q_s3 = config.q_s3(meta);
+            let q_s3 = q_s3(meta, config.q_sinsemilla2);
             let q_run = q_s2 - q_s3;
 
             // m_{i+1} = z_{i} - 2^K * q_{run,i} * z_{i + 1}
@@ -54,13 +54,13 @@ impl GeneratorTableConfig {
 
             let x_p = meta.query_advice(config.double_and_add.x_p, Rotation::cur());
 
-            // y_{p,i} = (Y_{A,i} / 2) - lambda1 * (x_{A,i} - x_{P,i})
+            // y_{p,i} = y_{a,i} - lambda1 * (x_{A,i} - x_{P,i})
             let y_p = {
                 let lambda1 = meta.query_advice(config.double_and_add.lambda_1, Rotation::cur());
                 let x_a = meta.query_advice(config.double_and_add.x_a, Rotation::cur());
-                let Y_A = config.double_and_add.Y_A(meta, Rotation::cur());
+                let y_a = config.double_and_add.y_a(meta, Rotation::cur());
 
-                (Y_A * pallas::Base::TWO_INV) - (lambda1 * (x_a - x_p.clone()))
+                y_a - (lambda1 * (x_a - x_p.clone()))
             };
 
             // Lookup expressions default to the first entry when `q_s1`

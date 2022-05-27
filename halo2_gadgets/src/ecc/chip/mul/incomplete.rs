@@ -11,7 +11,7 @@ use halo2_proofs::{
     poly::Rotation,
 };
 
-use pasta_curves::{arithmetic::FieldExt, pallas};
+use pasta_curves::pallas;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Config<const NUM_BITS: usize> {
@@ -42,11 +42,53 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
         meta.enable_equality(z);
         meta.enable_equality(lambda_1);
 
-        let double_and_add = DoubleAndAdd::configure(x_a, x_p, lambda_1, lambda_2);
+        let q_mul_1 = meta.selector();
+        let q_mul_2 = meta.selector();
+        let q_mul_3 = meta.selector();
+
+        // Configure steady-state double-and-add gate
+        let double_and_add = DoubleAndAdd::configure(
+            meta,
+            x_a,
+            x_p,
+            lambda_1,
+            lambda_2,
+            &|meta: &mut VirtualCells<pallas::Base>| meta.query_selector(q_mul_2),
+        );
+
+        // Initial double-and-add gate
+        meta.create_gate("init check", |meta| {
+            let selector = meta.query_selector(q_mul_1);
+            let y_a_derived = double_and_add.y_a(meta, Rotation::next());
+            let y_a_witnessed = meta.query_advice(lambda_1, Rotation::cur());
+
+            Constraints::with_selector(selector, Some(("init y_a", y_a_witnessed - y_a_derived)))
+        });
+
+        // Final double-and-add gate
+        meta.create_gate("final check", |meta| {
+            // x_{A,i}
+            let x_a_cur = meta.query_advice(double_and_add.x_a, Rotation::cur());
+            // x_{A,i-1}
+            let x_a_next = meta.query_advice(double_and_add.x_a, Rotation::next());
+            // λ_{2,i}
+            let lambda2_cur = meta.query_advice(double_and_add.lambda_2, Rotation::cur());
+            let y_a_cur = double_and_add.y_a(meta, Rotation::cur());
+
+            let selector = meta.query_selector(q_mul_3);
+            let lhs = lambda2_cur * (x_a_cur - x_a_next);
+            let rhs = {
+                let y_a_final = meta.query_advice(lambda_1, Rotation::next());
+                y_a_cur + y_a_final
+            };
+
+            Constraints::with_selector(selector, [lhs - rhs])
+        });
+
         let config = Self {
-            q_mul_1: meta.selector(),
-            q_mul_2: meta.selector(),
-            q_mul_3: meta.selector(),
+            q_mul_1,
+            q_mul_2,
+            q_mul_3,
             z,
             double_and_add,
             y_p,
@@ -59,21 +101,15 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
 
     // Gate for incomplete addition part of variable-base scalar multiplication.
     fn create_gate(&self, meta: &mut ConstraintSystem<pallas::Base>) {
-        // Closure to compute x_{R,i} = λ_{1,i}^2 - x_{A,i} - x_{P,i}
-        let x_r = |meta: &mut VirtualCells<pallas::Base>, rotation: Rotation| {
-            self.double_and_add.x_r(meta, rotation)
-        };
-
         // Closure to compute y_{A,i} = (λ_{1,i} + λ_{2,i}) * (x_{A,i} - x_{R,i}) / 2
         let y_a = |meta: &mut VirtualCells<pallas::Base>, rotation: Rotation| {
-            self.double_and_add.Y_A(meta, rotation) * pallas::Base::TWO_INV
+            self.double_and_add.y_a(meta, rotation)
         };
 
         // Constraints used for q_mul_{2, 3} == 1
         // https://p.z.cash/halo2-0.1:ecc-var-mul-incomplete-main-loop?partial
         // https://p.z.cash/halo2-0.1:ecc-var-mul-incomplete-last-row?partial
-        let for_loop = |meta: &mut VirtualCells<pallas::Base>,
-                        y_a_next: Expression<pallas::Base>| {
+        let for_loop = |meta: &mut VirtualCells<pallas::Base>| {
             let one = Expression::Constant(pallas::Base::one());
 
             // z_i
@@ -82,16 +118,12 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
             let z_prev = meta.query_advice(self.z, Rotation::prev());
             // x_{A,i}
             let x_a_cur = meta.query_advice(self.double_and_add.x_a, Rotation::cur());
-            // x_{A,i-1}
-            let x_a_next = meta.query_advice(self.double_and_add.x_a, Rotation::next());
             // x_{P,i}
             let x_p_cur = meta.query_advice(self.double_and_add.x_p, Rotation::cur());
             // y_{P,i}
             let y_p_cur = meta.query_advice(self.y_p, Rotation::cur());
             // λ_{1,i}
             let lambda1_cur = meta.query_advice(self.double_and_add.lambda_1, Rotation::cur());
-            // λ_{2,i}
-            let lambda2_cur = meta.query_advice(self.double_and_add.lambda_2, Rotation::cur());
 
             let y_a_cur = y_a(meta, Rotation::cur());
 
@@ -103,41 +135,18 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
             let bool_check = bool_check(k.clone());
 
             // λ_{1,i}⋅(x_{A,i} − x_{P,i}) − y_{A,i} + (2k_i - 1) y_{P,i} = 0
-            let gradient_1 = lambda1_cur * (x_a_cur.clone() - x_p_cur) - y_a_cur.clone()
+            let gradient_1 = lambda1_cur * (x_a_cur - x_p_cur) - y_a_cur
                 + (k * pallas::Base::from(2) - one) * y_p_cur;
-
-            // λ_{2,i}^2 − x_{A,i-1} − x_{R,i} − x_{A,i} = 0
-            let secant_line = lambda2_cur.clone().square()
-                - x_a_next.clone()
-                - x_r(meta, Rotation::cur())
-                - x_a_cur.clone();
-
-            // λ_{2,i}⋅(x_{A,i} − x_{A,i-1}) − y_{A,i} − y_{A,i-1} = 0
-            let gradient_2 = lambda2_cur * (x_a_cur - x_a_next) - y_a_cur - y_a_next;
 
             std::iter::empty()
                 .chain(Some(("bool_check", bool_check)))
                 .chain(Some(("gradient_1", gradient_1)))
-                .chain(Some(("secant_line", secant_line)))
-                .chain(Some(("gradient_2", gradient_2)))
         };
-
-        // q_mul_1 == 1 checks
-        // https://p.z.cash/halo2-0.1:ecc-var-mul-incomplete-first-row
-        meta.create_gate("q_mul_1 == 1 checks", |meta| {
-            let q_mul_1 = meta.query_selector(self.q_mul_1);
-
-            let y_a_next = y_a(meta, Rotation::next());
-            let y_a_witnessed = meta.query_advice(self.double_and_add.lambda_1, Rotation::cur());
-            Constraints::with_selector(q_mul_1, Some(("init y_a", y_a_witnessed - y_a_next)))
-        });
 
         // q_mul_2 == 1 checks
         // https://p.z.cash/halo2-0.1:ecc-var-mul-incomplete-main-loop?partial
         meta.create_gate("q_mul_2 == 1 checks", |meta| {
             let q_mul_2 = meta.query_selector(self.q_mul_2);
-
-            let y_a_next = y_a(meta, Rotation::next());
 
             // x_{P,i}
             let x_p_cur = meta.query_advice(self.double_and_add.x_p, Rotation::cur());
@@ -158,7 +167,7 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
                 std::iter::empty()
                     .chain(Some(("x_p_check", x_p_check)))
                     .chain(Some(("y_p_check", y_p_check)))
-                    .chain(for_loop(meta, y_a_next)),
+                    .chain(for_loop(meta)),
             )
         });
 
@@ -166,8 +175,7 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
         // https://p.z.cash/halo2-0.1:ecc-var-mul-incomplete-last-row?partial
         meta.create_gate("q_mul_3 == 1 checks", |meta| {
             let q_mul_3 = meta.query_selector(self.q_mul_3);
-            let y_a_final = meta.query_advice(self.double_and_add.lambda_1, Rotation::next());
-            Constraints::with_selector(q_mul_3, for_loop(meta, y_a_final))
+            Constraints::with_selector(q_mul_3, for_loop(meta))
         });
     }
 

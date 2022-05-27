@@ -3,8 +3,8 @@
 use std::marker::PhantomData;
 
 use halo2_proofs::{
-    arithmetic::CurveAffine,
-    plonk::{Advice, Column, Expression, VirtualCells},
+    arithmetic::{CurveAffine, FieldExt},
+    plonk::{Advice, Column, ConstraintSystem, Constraints, Expression, VirtualCells},
     poly::Rotation,
 };
 
@@ -24,18 +24,103 @@ pub(crate) struct DoubleAndAdd<C: CurveAffine> {
 
 impl<C: CurveAffine> DoubleAndAdd<C> {
     pub(crate) fn configure(
+        meta: &mut ConstraintSystem<C::Base>,
         x_a: Column<Advice>,
         x_p: Column<Advice>,
         lambda_1: Column<Advice>,
         lambda_2: Column<Advice>,
+        main_selector: &dyn Fn(&mut VirtualCells<C::Base>) -> Expression<C::Base>,
     ) -> Self {
-        Self {
+        let config = Self {
             x_a,
             x_p,
             lambda_1,
             lambda_2,
             _marker: PhantomData,
-        }
+        };
+
+        config.main_gate(meta, main_selector);
+
+        config
+    }
+
+    /// Gate checking consistency of initial witnessed `y_a` with the first
+    /// derived `y_a`.
+    fn init_gate(
+        &self,
+        meta: &mut ConstraintSystem<C::Base>,
+        selector: &dyn Fn(&mut VirtualCells<C::Base>) -> Expression<C::Base>,
+        y_a_init_witnessed: &dyn Fn(&mut VirtualCells<C::Base>) -> Expression<C::Base>,
+        y_a_init_derived: Rotation,
+    ) {
+        meta.create_gate("init check", |meta| {
+            let selector = selector(meta);
+            let y_a_derived = self.y_a(meta, y_a_init_derived);
+            let y_a_witnessed = y_a_init_witnessed(meta);
+
+            Constraints::with_selector(selector, Some(("init y_a", y_a_witnessed - y_a_derived)))
+        });
+    }
+
+    /// Gate checking double-and-add at each step in the steady state.
+    fn main_gate(
+        &self,
+        meta: &mut ConstraintSystem<C::Base>,
+        selector: &dyn Fn(&mut VirtualCells<C::Base>) -> Expression<C::Base>,
+    ) {
+        meta.create_gate("main check", |meta| {
+            let for_loop = |meta: &mut VirtualCells<C::Base>, y_a_next: Expression<C::Base>| {
+                // x_{A,i}
+                let x_a_cur = meta.query_advice(self.x_a, Rotation::cur());
+                // x_{A,i-1}
+                let x_a_next = meta.query_advice(self.x_a, Rotation::next());
+                // λ_{2,i}
+                let lambda2_cur = meta.query_advice(self.lambda_2, Rotation::cur());
+
+                let y_a_cur = self.y_a(meta, Rotation::cur());
+
+                // λ_{2,i}^2 − x_{A,i-1} − x_{R,i} − x_{A,i} = 0
+                let secant_line = lambda2_cur.clone().square()
+                    - x_a_next.clone()
+                    - self.x_r(meta, Rotation::cur())
+                    - x_a_cur.clone();
+
+                // λ_{2,i}⋅(x_{A,i} − x_{A,i-1}) − y_{A,i} − y_{A,i-1} = 0
+                let gradient_2 = lambda2_cur * (x_a_cur - x_a_next) - y_a_cur - y_a_next;
+
+                std::iter::empty()
+                    .chain(Some(("secant_line", secant_line)))
+                    .chain(Some(("gradient_2", gradient_2)))
+            };
+
+            let selector = selector(meta);
+            let y_a_next = self.y_a(meta, Rotation::next());
+            Constraints::with_selector(selector, for_loop(meta, y_a_next))
+        })
+    }
+
+    /// Gate checking the final output of double-and-add.
+    fn final_gate(
+        &self,
+        meta: &mut ConstraintSystem<C::Base>,
+        selector: &dyn Fn(&mut VirtualCells<C::Base>) -> Expression<C::Base>,
+        y_a_final: &dyn Fn(&mut VirtualCells<C::Base>) -> Expression<C::Base>,
+    ) {
+        meta.create_gate("final check", |meta| {
+            // x_{A,i}
+            let x_a_cur = meta.query_advice(self.x_a, Rotation::cur());
+            // x_{A,i-1}
+            let x_a_next = meta.query_advice(self.x_a, Rotation::next());
+            // λ_{2,i}
+            let lambda2_cur = meta.query_advice(self.lambda_2, Rotation::cur());
+            let y_a_cur = self.y_a(meta, Rotation::cur());
+
+            let selector = selector(meta);
+            let lhs = lambda2_cur * (x_a_cur - x_a_next);
+            let rhs = y_a_cur + y_a_final(meta);
+
+            Constraints::with_selector(selector, [lhs - rhs])
+        })
     }
 
     /// Derives the expression `x_r = lambda_1^2 - x_a - x_p`.
@@ -50,12 +135,9 @@ impl<C: CurveAffine> DoubleAndAdd<C> {
         lambda_1.square() - x_a - x_p
     }
 
-    /// Derives the expression `Y_A = (lambda_1 + lambda_2) * (x_a - x_r)`.
-    ///
-    /// Note that this is missing the factor of `1/2`; the Sinsemilla constraints factor
-    /// it out, so we leave it up to the caller to handle it.
+    /// Derives the expression `y_a = [(lambda_1 + lambda_2) * (x_a - x_r)] / 2`.
     #[allow(non_snake_case)]
-    pub(crate) fn Y_A(
+    pub(crate) fn y_a(
         &self,
         meta: &mut VirtualCells<C::Base>,
         rotation: Rotation,
@@ -63,6 +145,6 @@ impl<C: CurveAffine> DoubleAndAdd<C> {
         let x_a = meta.query_advice(self.x_a, rotation);
         let lambda_1 = meta.query_advice(self.lambda_1, rotation);
         let lambda_2 = meta.query_advice(self.lambda_2, rotation);
-        (lambda_1 + lambda_2) * (x_a - self.x_r(meta, rotation))
+        (lambda_1 + lambda_2) * (x_a - self.x_r(meta, rotation)) * C::Base::TWO_INV
     }
 }
