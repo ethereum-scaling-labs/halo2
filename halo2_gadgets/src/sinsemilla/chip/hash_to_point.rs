@@ -8,16 +8,11 @@ use crate::{
 use halo2_proofs::circuit::AssignedCell;
 use halo2_proofs::{
     circuit::{Chip, Region},
-    plonk::{Assigned, Error},
+    plonk::Error,
 };
 
-use group::ff::{PrimeField, PrimeFieldBits};
-use pasta_curves::{
-    arithmetic::{CurveAffine, FieldExt},
-    pallas,
-};
-
-use std::ops::Deref;
+use group::ff::{Field, PrimeField, PrimeFieldBits};
+use pasta_curves::{arithmetic::CurveAffine, pallas};
 
 impl<Hash, Commit, Fixed> SinsemillaChip<Hash, Commit, Fixed>
 where
@@ -53,25 +48,23 @@ where
 
         // Constrain the initial x_a, lambda_1, lambda_2, x_p using the q_sinsemilla4
         // selector.
-        let mut y_a: Y<pallas::Base> = {
+        let mut y_a = {
             // Enable `q_sinsemilla4` on the first row.
             config.q_sinsemilla4.enable(region, offset)?;
             region.assign_fixed(|| "fixed y_q", config.fixed_y_q, offset, || Ok(y_q))?;
 
-            (Some(y_q.into())).into()
+            Some(y_q)
         };
 
         // Constrain the initial x_q to equal the x-coordinate of the domain's `Q`.
-        let mut x_a: X<pallas::Base> = {
-            let x_a = region.assign_advice_from_constant(
+        let mut x_a = region
+            .assign_advice_from_constant(
                 || "fixed x_q",
                 config.double_and_add.x_a,
                 offset,
                 x_q.into(),
-            )?;
-
-            x_a.into()
-        };
+            )?
+            .evaluate();
 
         let mut zs_sum: Vec<Vec<AssignedCell<pallas::Base, pallas::Base>>> = Vec::new();
 
@@ -160,11 +153,8 @@ where
                 let expected_point = bitstring
                     .chunks(K)
                     .fold(Q.to_curve(), |acc, chunk| (acc + S(chunk)) + acc);
-                let actual_point = pallas::Affine::from_xy(
-                    x_a.value().unwrap().evaluate(),
-                    y_a.value().unwrap().evaluate(),
-                )
-                .unwrap();
+                let actual_point =
+                    pallas::Affine::from_xy(*x_a.value().unwrap(), *y_a.value().unwrap()).unwrap();
                 assert_eq!(expected_point.to_affine(), actual_point);
             }
         }
@@ -177,7 +167,7 @@ where
             }
         }
         Ok((
-            NonIdentityEccPoint::from_coordinates_unchecked(x_a.0.evaluate(), y_a.evaluate()),
+            NonIdentityEccPoint::from_coordinates_unchecked(x_a, y_a),
             zs_sum,
         ))
     }
@@ -198,13 +188,13 @@ where
             { sinsemilla::K },
             { sinsemilla::C },
         >>::MessagePiece,
-        mut x_a: X<pallas::Base>,
-        mut y_a: Y<pallas::Base>,
+        mut x_a: AssignedCell<pallas::Base, pallas::Base>,
+        mut y_a: Option<pallas::Base>,
         final_piece: bool,
     ) -> Result<
         (
-            X<pallas::Base>,
-            Y<pallas::Base>,
+            AssignedCell<pallas::Base, pallas::Base>,
+            Option<pallas::Base>,
             Vec<AssignedCell<pallas::Base, pallas::Base>>,
         ),
         Error,
@@ -335,127 +325,18 @@ where
         for (row, gen) in generators.iter().enumerate() {
             let x_p = gen.map(|gen| gen.0);
             let y_p = gen.map(|gen| gen.1);
-
-            // Assign `x_p`
-            region.assign_advice(
-                || "x_p",
-                config.double_and_add.x_p,
+            let new_acc = config.double_and_add.assign_region(
+                region,
                 offset + row,
-                || x_p.ok_or(Error::Synthesis),
+                (x_p.map(|v| v.into()), y_p.map(|v| v.into())),
+                x_a.into(),
+                y_a.map(|y_a| y_a.into()),
             )?;
 
-            // Compute and assign `lambda_1`
-            let lambda_1 = {
-                let lambda_1 = x_a
-                    .value()
-                    .zip(y_a.0)
-                    .zip(x_p)
-                    .zip(y_p)
-                    .map(|(((x_a, y_a), x_p), y_p)| (y_a - y_p) * (x_a - x_p).invert());
-
-                // Assign lambda_1
-                region.assign_advice(
-                    || "lambda_1",
-                    config.double_and_add.lambda_1,
-                    offset + row,
-                    || lambda_1.ok_or(Error::Synthesis),
-                )?;
-
-                lambda_1
-            };
-
-            // Compute `x_r`
-            let x_r = lambda_1
-                .zip(x_a.value())
-                .zip(x_p)
-                .map(|((lambda_1, x_a), x_p)| lambda_1.square() - x_a - x_p);
-
-            // Compute and assign `lambda_2`
-            let lambda_2 = {
-                let lambda_2 = x_a.value().zip(y_a.0).zip(x_r).zip(lambda_1).map(
-                    |(((x_a, y_a), x_r), lambda_1)| {
-                        y_a * pallas::Base::from(2) * (x_a - x_r).invert() - lambda_1
-                    },
-                );
-
-                region.assign_advice(
-                    || "lambda_2",
-                    config.double_and_add.lambda_2,
-                    offset + row,
-                    || lambda_2.ok_or(Error::Synthesis),
-                )?;
-
-                lambda_2
-            };
-
-            // Compute and assign `x_a` for the next row.
-            let x_a_new: X<pallas::Base> = {
-                let x_a_new = lambda_2
-                    .zip(x_a.value())
-                    .zip(x_r)
-                    .map(|((lambda_2, x_a), x_r)| lambda_2.square() - x_a - x_r);
-
-                let x_a_cell = region.assign_advice(
-                    || "x_a",
-                    config.double_and_add.x_a,
-                    offset + row + 1,
-                    || x_a_new.ok_or(Error::Synthesis),
-                )?;
-
-                x_a_cell.into()
-            };
-
-            // Compute y_a for the next row.
-            let y_a_new: Y<pallas::Base> = lambda_2
-                .zip(x_a.value())
-                .zip(x_a_new.value())
-                .zip(y_a.0)
-                .map(|(((lambda_2, x_a), x_a_new), y_a)| lambda_2 * (x_a - x_a_new) - y_a)
-                .into();
-
-            // Update the mutable `x_a`, `y_a` variables.
-            x_a = x_a_new;
-            y_a = y_a_new;
+            x_a = new_acc.0.evaluate();
+            y_a = new_acc.1.map(|y| y.evaluate());
         }
 
         Ok((x_a, y_a, zs))
-    }
-}
-
-/// The x-coordinate of the accumulator in a Sinsemilla hash instance.
-struct X<F: FieldExt>(AssignedCell<Assigned<F>, F>);
-
-impl<F: FieldExt> From<AssignedCell<Assigned<F>, F>> for X<F> {
-    fn from(cell_value: AssignedCell<Assigned<F>, F>) -> Self {
-        X(cell_value)
-    }
-}
-
-impl<F: FieldExt> Deref for X<F> {
-    type Target = AssignedCell<Assigned<F>, F>;
-
-    fn deref(&self) -> &AssignedCell<Assigned<F>, F> {
-        &self.0
-    }
-}
-
-/// The y-coordinate of the accumulator in a Sinsemilla hash instance.
-///
-/// This is never actually witnessed until the last round, since it
-/// can be derived from other variables. Thus it only exists as a field
-/// element, not a `CellValue`.
-struct Y<F: FieldExt>(Option<Assigned<F>>);
-
-impl<F: FieldExt> From<Option<Assigned<F>>> for Y<F> {
-    fn from(value: Option<Assigned<F>>) -> Self {
-        Y(value)
-    }
-}
-
-impl<F: FieldExt> Deref for Y<F> {
-    type Target = Option<Assigned<F>>;
-
-    fn deref(&self) -> &Option<Assigned<F>> {
-        &self.0
     }
 }

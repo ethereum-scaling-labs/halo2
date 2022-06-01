@@ -212,7 +212,7 @@ impl Config {
                     offset,
                     base,
                     bits_incomplete_hi,
-                    (X(acc.x), Y(acc.y), z_init.clone()),
+                    (acc.x, acc.y, z_init.clone()),
                 )?;
 
                 // Double-and-add (incomplete addition) for the `lo` half of the scalar decomposition
@@ -399,28 +399,6 @@ impl Config {
         let result = self.add_config.assign_region(&p, &acc, offset, region)?;
 
         Ok((result, z_0))
-    }
-}
-
-#[derive(Clone, Debug)]
-// `x`-coordinate of the accumulator.
-struct X<F: FieldExt>(AssignedCell<F, F>);
-impl<F: FieldExt> Deref for X<F> {
-    type Target = AssignedCell<F, F>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-#[derive(Clone, Debug)]
-// `y`-coordinate of the accumulator.
-struct Y<F: FieldExt>(AssignedCell<F, F>);
-impl<F: FieldExt> Deref for Y<F> {
-    type Target = AssignedCell<F, F>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
     }
 }
 

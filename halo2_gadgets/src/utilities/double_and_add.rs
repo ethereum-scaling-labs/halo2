@@ -4,7 +4,10 @@ use std::marker::PhantomData;
 
 use halo2_proofs::{
     arithmetic::{CurveAffine, FieldExt},
-    plonk::{Advice, Column, ConstraintSystem, Constraints, Expression, VirtualCells},
+    circuit::{AssignedCell, Region},
+    plonk::{
+        Advice, Assigned, Column, ConstraintSystem, Constraints, Error, Expression, VirtualCells,
+    },
     poly::Rotation,
 };
 
@@ -23,6 +26,7 @@ pub(crate) struct DoubleAndAdd<C: CurveAffine> {
 }
 
 impl<C: CurveAffine> DoubleAndAdd<C> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn configure(
         meta: &mut ConstraintSystem<C::Base>,
         x_a: Column<Advice>,
@@ -146,5 +150,96 @@ impl<C: CurveAffine> DoubleAndAdd<C> {
         let lambda_1 = meta.query_advice(self.lambda_1, rotation);
         let lambda_2 = meta.query_advice(self.lambda_2, rotation);
         (lambda_1 + lambda_2) * (x_a - self.x_r(meta, rotation)) * C::Base::TWO_INV
+    }
+
+    /// Assigns one double-and-add round in the steady state.
+    ///
+    /// The main selector must be enabled outside of this helper.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn assign_region(
+        &self,
+        region: &mut Region<'_, C::Base>,
+        offset: usize,
+        (x_p, y_p): (Option<Assigned<C::Base>>, Option<Assigned<C::Base>>),
+        x_a: AssignedCell<Assigned<C::Base>, C::Base>,
+        y_a: Option<Assigned<C::Base>>,
+    ) -> Result<
+        (
+            AssignedCell<Assigned<C::Base>, C::Base>,
+            Option<Assigned<C::Base>>,
+        ),
+        Error,
+    > {
+        // Assign `x_p`
+        region.assign_advice(|| "x_p", self.x_p, offset, || x_p.ok_or(Error::Synthesis))?;
+
+        // Compute and assign `lambda_1`
+        let lambda_1 = {
+            let lambda_1 = x_a
+                .value()
+                .zip(y_a)
+                .zip(x_p)
+                .zip(y_p)
+                .map(|(((x_a, y_a), x_p), y_p)| (y_a - y_p) * (*x_a - x_p).invert());
+
+            // Assign lambda_1
+            region.assign_advice(
+                || "lambda_1",
+                self.lambda_1,
+                offset,
+                || lambda_1.ok_or(Error::Synthesis),
+            )?;
+
+            lambda_1
+        };
+
+        // Compute `x_r`
+        let x_r = lambda_1
+            .zip(x_a.value())
+            .zip(x_p)
+            .map(|((lambda_1, x_a), x_p)| lambda_1.square() - *x_a - x_p);
+
+        // Compute and assign `lambda_2`
+        let lambda_2 =
+            {
+                let lambda_2 = x_a.value().zip(y_a).zip(x_r).zip(lambda_1).map(
+                    |(((x_a, y_a), x_r), lambda_1)| {
+                        y_a * C::Base::from(2) * (*x_a - x_r.evaluate()).invert() - lambda_1
+                    },
+                );
+
+                region.assign_advice(
+                    || "lambda_2",
+                    self.lambda_2,
+                    offset,
+                    || lambda_2.ok_or(Error::Synthesis),
+                )?;
+
+                lambda_2
+            };
+
+        // Compute and assign `x_a` for the next row.
+        let x_a_new = {
+            let x_a_new = lambda_2
+                .zip(x_a.value())
+                .zip(x_r)
+                .map(|((lambda_2, x_a), x_r)| lambda_2.square() - *x_a - x_r);
+
+            region.assign_advice(
+                || "x_a",
+                self.x_a,
+                offset + 1,
+                || x_a_new.ok_or(Error::Synthesis),
+            )?
+        };
+
+        // Compute y_a for the next row.
+        let y_a_new =
+            lambda_2.zip(x_a.value()).zip(x_a_new.value()).zip(y_a).map(
+                |(((lambda_2, x_a), x_a_new), y_a)| lambda_2 * (*x_a - x_a_new.evaluate()) - y_a,
+            );
+
+        Ok((x_a_new, y_a_new))
     }
 }
