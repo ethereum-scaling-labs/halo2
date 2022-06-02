@@ -102,11 +102,6 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
 
     // Gate for incomplete addition part of variable-base scalar multiplication.
     fn create_gate(&self, meta: &mut ConstraintSystem<pallas::Base>) {
-        // Closure to compute y_{A,i} = (λ_{1,i} + λ_{2,i}) * (x_{A,i} - x_{R,i}) / 2
-        let y_a = |meta: &mut VirtualCells<pallas::Base>, rotation: Rotation| {
-            self.double_and_add.y_a(meta, rotation)
-        };
-
         // Constraints used for q_mul_{2, 3} == 1
         // https://p.z.cash/halo2-0.1:ecc-var-mul-incomplete-main-loop?partial
         // https://p.z.cash/halo2-0.1:ecc-var-mul-incomplete-last-row?partial
@@ -117,16 +112,8 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
             let z_cur = meta.query_advice(self.z, Rotation::cur());
             // z_{i+1}
             let z_prev = meta.query_advice(self.z, Rotation::prev());
-            // x_{A,i}
-            let x_a_cur = meta.query_advice(self.double_and_add.x_a, Rotation::cur());
-            // x_{P,i}
-            let x_p_cur = meta.query_advice(self.double_and_add.x_p, Rotation::cur());
             // y_{P,i}
             let y_p_cur = meta.query_advice(self.y_p, Rotation::cur());
-            // λ_{1,i}
-            let lambda1_cur = meta.query_advice(self.double_and_add.lambda_1, Rotation::cur());
-
-            let y_a_cur = y_a(meta, Rotation::cur());
 
             // The current bit in the scalar decomposition, k_i = z_i - 2⋅z_{i+1}.
             // Recall that we assigned the cumulative variable `z_i` in descending order,
@@ -135,9 +122,9 @@ impl<const NUM_BITS: usize> Config<NUM_BITS> {
             // Check booleanity of decomposition.
             let bool_check = bool_check(k.clone());
 
-            // λ_{1,i}⋅(x_{A,i} − x_{P,i}) − y_{A,i} + (2k_i - 1) y_{P,i} = 0
-            let gradient_1 = lambda1_cur * (x_a_cur - x_p_cur) - y_a_cur
-                + (k * pallas::Base::from(2) - one) * y_p_cur;
+            // (2k_i - 1) y_{P,i} - y_p = 0
+            let gradient_1 = (k * pallas::Base::from(2) - one) * y_p_cur
+                - self.double_and_add.y_p(meta, Rotation::cur());
 
             std::iter::empty()
                 .chain(Some(("bool_check", bool_check)))

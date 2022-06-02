@@ -152,6 +152,21 @@ impl<C: CurveAffine> DoubleAndAdd<C> {
         (lambda_1 + lambda_2) * (x_a - self.x_r(meta, rotation)) * C::Base::TWO_INV
     }
 
+    /// Derives the expression `y_p = y_a - lambda1 * (x_a - x_p)`.
+    #[allow(non_snake_case)]
+    pub(crate) fn y_p(
+        &self,
+        meta: &mut VirtualCells<C::Base>,
+        rotation: Rotation,
+    ) -> Expression<C::Base> {
+        let y_a = self.y_a(meta, rotation);
+        let lambda_1 = meta.query_advice(self.lambda_1, rotation);
+        let x_a = meta.query_advice(self.x_a, rotation);
+        let x_p = meta.query_advice(self.x_p, rotation);
+
+        y_a - lambda_1 * (x_a - x_p)
+    }
+
     /// Assigns one double-and-add round in the steady state.
     ///
     /// The main selector must be enabled outside of this helper.

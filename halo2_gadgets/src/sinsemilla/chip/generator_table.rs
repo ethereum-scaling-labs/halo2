@@ -55,13 +55,7 @@ impl GeneratorTableConfig {
             let x_p = meta.query_advice(config.double_and_add.x_p, Rotation::cur());
 
             // y_{p,i} = y_{a,i} - lambda1 * (x_{A,i} - x_{P,i})
-            let y_p = {
-                let lambda1 = meta.query_advice(config.double_and_add.lambda_1, Rotation::cur());
-                let x_a = meta.query_advice(config.double_and_add.x_a, Rotation::cur());
-                let y_a = config.double_and_add.y_a(meta, Rotation::cur());
-
-                y_a - (lambda1 * (x_a - x_p.clone()))
-            };
+            let y_p = config.double_and_add.y_p(meta, Rotation::cur());
 
             // Lookup expressions default to the first entry when `q_s1`
             // is not enabled.
